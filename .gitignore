@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Local env / secrets
+.env
+*.local
+
+# PostgreSQL local data / logs
+pgdata/
+*.log
+
+# OS
+.DS_Store

@@ -1,0 +1,11 @@
+asset_tag,name,asset_type,manufacturer,model_number,voltage_rating_kv,location,latitude,longitude,install_date,status,criticality
+TX-0009,Distribution Transformer #9,transformer,ABB,TrafoStar-15,15.00,Coyote Substation,37.250200,-121.760200,2020-05-10,in_service,3
+CB-0103,Feeder Circuit Breaker C,circuit_breaker,Schneider,MasterPact-NW,69.00,Evergreen Substation,37.300300,-121.770300,2015-04-18,in_service,4
+TL-0203,Transmission Line South Span,transmission_line,Southwire,ACSR-Drake,230.00,South Corridor MP 1-7,37.200000,-121.700000,2010-09-23,in_service,5
+CAP-0402,Capacitor Bank #2,capacitor_bank,GE,CapBank-DX,12.47,Coyote Substation,37.250300,-121.760300,2019-08-01,in_service,2
+RC-0502,Pole-Top Recloser 6,recloser,S&C,IntelliRupter,12.47,Coyote Feeder 3,37.250400,-121.760400,2022-02-14,in_service,3
+SW-0302,Switchgear Lineup 2,switchgear,ABB,UniGear-ZS1,25.00,Evergreen Substation,37.300400,-121.770400,2018-11-30,in_service,3
+MT-0802,Revenue Meter Bank 9,meter,Itron,OpenWay-Riva,0.48,Berryessa Substation,37.385930,-121.864330,2021-07-19,in_service,1
+RG-0602,Voltage Regulator 7,regulator,Eaton,CL-7,12.47,Alviso Feeder 1,37.426500,-121.975700,2017-03-08,in_service,2
+PL-0901,Transmission Pole 901,pole,Valmont,SteelPole-90,230.00,North Corridor MP 15,37.500500,-121.900500,2008-05-01,in_service,3
+TX-0010,Main Power Transformer #10,transformer,Siemens,GEAFOL-40,40.00,South Substation,37.200100,-121.700100,2013-12-12,in_service,4
