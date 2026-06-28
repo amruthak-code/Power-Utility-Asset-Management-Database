@@ -43,6 +43,36 @@ COMMENT ON VIEW vw_overdue_assets IS
     'Assets with past-due active maintenance schedules, ranked by urgency.';
 
 -- -----------------------------------------------------------------------------
+-- VIEW 1b: Overdue work orders.
+--   Active (not completed/cancelled) work orders whose SLA due_date has passed,
+--   with how many days late and who owns them. days_late > 0 means overdue.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW vw_overdue_work_orders AS
+SELECT
+    wo.work_order_id,
+    wo.work_order_number,
+    wo.title,
+    wo.status,
+    wo.priority,
+    a.asset_tag,
+    a.name                            AS asset_name,
+    wo.scheduled_date,
+    wo.due_date,
+    (CURRENT_DATE - wo.due_date)      AS days_late,
+    t.employee_code,
+    CASE WHEN t.technician_id IS NULL THEN '(unassigned)'
+         ELSE t.first_name || ' ' || t.last_name END AS technician_name
+FROM work_orders wo
+JOIN assets a            ON a.asset_id = wo.asset_id
+LEFT JOIN technicians t  ON t.technician_id = wo.technician_id
+WHERE wo.status NOT IN ('completed', 'cancelled')
+  AND wo.due_date < CURRENT_DATE
+ORDER BY days_late DESC, wo.priority DESC;
+
+COMMENT ON VIEW vw_overdue_work_orders IS
+    'Active work orders past their SLA due_date, most overdue first.';
+
+-- -----------------------------------------------------------------------------
 -- VIEW 2: Technician workload.
 --   One row per technician with active/completed counts, hours logged, and
 --   utilization as active orders / capacity.

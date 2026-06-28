@@ -58,26 +58,52 @@ FROM vw_overdue_assets;
 -- Technician load and utilization
 SELECT technician_name, active_orders, completed_orders, utilization_pct, is_available
 FROM vw_technician_workload;
+
+-- Work orders past their SLA due date
+SELECT work_order_number, priority, due_date, days_late, employee_code
+FROM vw_overdue_work_orders;
 ```
 
 ### 3. Call the stored procedures
 
 ```sql
--- Create a work order (auto-numbered, capacity-checked)
+-- Auto-assign: the system computes the [scheduled_date, due_date] window from
+-- the priority SLA and picks the best-fit technician whose schedule has room.
 CALL sp_create_work_order(
     p_asset_tag       => 'TX-0001',
     p_title           => 'Emergency oil top-up',
     p_description     => 'Low oil alarm',
-    p_priority        => 'critical',
+    p_priority        => 'critical',          -- => due in 1 day
     p_scheduled_date  => CURRENT_DATE + 1,
     p_estimated_hours => 3,
-    p_employee_code   => 'TECH-001',
-    p_new_work_order_id => NULL
+    p_employee_code   => NULL,                 -- no explicit tech...
+    p_auto_assign     => TRUE,                 -- ...so the system chooses
+    p_specialization  => NULL,                 -- optional skill filter
+    p_new_work_order_id      => NULL,
+    p_assigned_employee_code => NULL           -- INOUT: who got the order
 );
+
+-- Or name a technician explicitly; it is rejected if their schedule can't fit
+-- the order's window (too many overlapping active deadlines).
+CALL sp_create_work_order('TX-0001','Oil top-up',NULL,'high',
+     CURRENT_DATE+1, 3, 'TECH-001', TRUE, NULL, NULL, NULL);
 
 -- Maintenance report for a date window
 SELECT * FROM fn_generate_maintenance_report(CURRENT_DATE - 365, CURRENT_DATE);
 ```
+
+### How dates and assignment work
+
+| Field | How it's set |
+|-------|--------------|
+| `scheduled_date` | Planned start; supplied at creation (defaults to today). |
+| `due_date` | SLA deadline auto-derived as `scheduled_date + SLA(priority)` — critical 1d, high 3d, medium 14d, low 30d. |
+| `completed_date` | Auto-stamped with today when an order is marked `completed`. |
+
+When assigning, each active order occupies a `[scheduled_date, due_date]`
+window. A technician can take a new order only if their **overlapping** active
+orders are fewer than `max_active_orders`, so deadlines don't collide. Past-due
+active orders show up in the `vw_overdue_work_orders` view.
 
 ## ETL: load assets from CSV
 
@@ -103,9 +129,11 @@ The sample `data/assets_import.csv` adds 10 more assets to the 12 seeded ones.
 
 ## Triggers in action
 
-- Completing a work order (`status = 'completed'`) automatically stamps the
-  asset's `last_inspected_date`, returns `under_maintenance` assets to service,
-  and advances the matching maintenance schedule.
+- Creating a work order auto-derives its `due_date` from the priority SLA; no
+  need to compute deadlines by hand.
+- Completing a work order (`status = 'completed'`) auto-stamps `completed_date`,
+  the asset's `last_inspected_date`, returns `under_maintenance` assets to
+  service, and advances the matching maintenance schedule.
 - Assigning/closing work orders automatically flips a technician's
   `is_available` flag based on their active workload vs. capacity.
 - Every status/assignment change is logged to `work_order_history`.

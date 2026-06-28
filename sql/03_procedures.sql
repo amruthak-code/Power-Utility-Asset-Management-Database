@@ -27,6 +27,76 @@
 --       p_new_work_order_id => NULL  -- INOUT, receives the new id
 --     );
 -- -----------------------------------------------------------------------------
+-- --- Schedule-fit helpers --------------------------------------------------
+-- An order occupies a time window [scheduled_date .. due_date]. A technician
+-- "fits" a new order only if the number of their *active* orders whose window
+-- overlaps the new window is below their max_active_orders cap. This keeps a
+-- technician from being double-booked across overlapping deadlines, while the
+-- is_available boolean (maintained by trg_technician_availability) still
+-- reflects their overall load.
+
+-- Count a technician's active orders that overlap a [start, due] window.
+-- Two windows overlap when  start_a <= due_b  AND  start_b <= due_a.
+CREATE OR REPLACE FUNCTION fn_technician_overlap_count(
+    p_technician_id INTEGER,
+    p_scheduled     DATE,
+    p_due           DATE
+)
+RETURNS INTEGER AS $$
+    SELECT COUNT(*)::int
+      FROM work_orders w
+     WHERE w.technician_id = p_technician_id
+       AND w.status IN ('assigned', 'in_progress', 'on_hold')
+       AND COALESCE(w.scheduled_date, w.created_at::date) <= p_due
+       AND w.due_date >= p_scheduled;
+$$ LANGUAGE sql STABLE;
+
+-- TRUE when the technician exists and has room for this window.
+CREATE OR REPLACE FUNCTION fn_technician_fits(
+    p_technician_id INTEGER,
+    p_scheduled     DATE,
+    p_due           DATE
+)
+RETURNS BOOLEAN AS $$
+    SELECT EXISTS (SELECT 1 FROM technicians WHERE technician_id = p_technician_id)
+       AND fn_technician_overlap_count(p_technician_id, p_scheduled, p_due)
+           < (SELECT max_active_orders FROM technicians
+               WHERE technician_id = p_technician_id);
+$$ LANGUAGE sql STABLE;
+
+-- Recommend the best-fit technician for a [scheduled, due] window: among those
+-- whose schedule has room, prefer the least time-conflicted, then the least
+-- loaded overall, then the highest certification. Optional specialization
+-- filter. Returns NULL when nobody fits.
+CREATE OR REPLACE FUNCTION fn_recommend_technician(
+    p_scheduled      DATE,
+    p_due            DATE,
+    p_specialization VARCHAR DEFAULT NULL
+)
+RETURNS INTEGER AS $$
+    SELECT t.technician_id
+      FROM technicians t
+      CROSS JOIN LATERAL (
+          SELECT fn_technician_overlap_count(t.technician_id, p_scheduled, p_due)
+                     AS overlap_cnt,
+                 (SELECT COUNT(*) FROM work_orders w
+                   WHERE w.technician_id = t.technician_id
+                     AND w.status IN ('assigned','in_progress','on_hold'))
+                     AS active_cnt
+      ) c
+     WHERE (p_specialization IS NULL
+            OR t.specialization ILIKE '%' || p_specialization || '%')
+       AND c.overlap_cnt < t.max_active_orders
+     ORDER BY c.overlap_cnt ASC, c.active_cnt ASC,
+              t.certification_level DESC, t.technician_id ASC
+     LIMIT 1;
+$$ LANGUAGE sql STABLE;
+
+-- --- The procedure ---------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_create_work_order(
+    VARCHAR, VARCHAR, TEXT, work_order_priority_enum, DATE, NUMERIC,
+    VARCHAR, INTEGER);
+
 CREATE OR REPLACE PROCEDURE sp_create_work_order(
     p_asset_tag         VARCHAR,
     p_title             VARCHAR,
@@ -34,17 +104,22 @@ CREATE OR REPLACE PROCEDURE sp_create_work_order(
     p_priority          work_order_priority_enum  DEFAULT 'medium',
     p_scheduled_date    DATE                      DEFAULT NULL,
     p_estimated_hours   NUMERIC                   DEFAULT NULL,
-    p_employee_code     VARCHAR                   DEFAULT NULL,
-    INOUT p_new_work_order_id INTEGER             DEFAULT NULL
+    p_employee_code     VARCHAR                   DEFAULT NULL,  -- explicit tech
+    p_auto_assign       BOOLEAN                   DEFAULT TRUE,  -- pick best fit?
+    p_specialization    VARCHAR                   DEFAULT NULL,  -- auto-assign filter
+    INOUT p_new_work_order_id        INTEGER      DEFAULT NULL,
+    INOUT p_assigned_employee_code   VARCHAR      DEFAULT NULL   -- who got it
 )
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_asset_id      INTEGER;
     v_technician_id INTEGER := NULL;
-    v_active_count  INTEGER;
+    v_overlap       INTEGER;
     v_cap           SMALLINT;
     v_status        work_order_status_enum := 'open';
+    v_scheduled     DATE;
+    v_due           DATE;
     v_wo_number     VARCHAR(30);
 BEGIN
     -- Resolve and validate the asset.
@@ -54,8 +129,12 @@ BEGIN
         RAISE EXCEPTION 'Asset with tag "%" does not exist.', p_asset_tag;
     END IF;
 
-    -- Resolve and capacity-check the technician, if one was supplied.
+    -- Compute the order's planned window up front so we can fit it.
+    v_scheduled := COALESCE(p_scheduled_date, CURRENT_DATE);
+    v_due       := v_scheduled + fn_priority_sla_days(p_priority);
+
     IF p_employee_code IS NOT NULL THEN
+        -- Explicit technician: must exist AND have room in this window.
         SELECT technician_id, max_active_orders
           INTO v_technician_id, v_cap
           FROM technicians WHERE employee_code = p_employee_code;
@@ -65,18 +144,25 @@ BEGIN
                 p_employee_code;
         END IF;
 
-        SELECT COUNT(*) INTO v_active_count
-          FROM work_orders
-         WHERE technician_id = v_technician_id
-           AND status IN ('assigned', 'in_progress', 'on_hold');
-
-        IF v_active_count >= v_cap THEN
+        v_overlap := fn_technician_overlap_count(v_technician_id, v_scheduled, v_due);
+        IF v_overlap >= v_cap THEN
             RAISE EXCEPTION
-                'Technician "%" is at capacity (% / % active orders).',
-                p_employee_code, v_active_count, v_cap;
+                'Technician "%" cannot take this order: % overlapping active '
+                'order(s) in the % .. % window already meets the cap of %.',
+                p_employee_code, v_overlap, v_scheduled, v_due, v_cap;
         END IF;
+        v_status := 'assigned';
 
-        v_status := 'assigned';  -- assigning at creation moves it past 'open'
+    ELSIF p_auto_assign THEN
+        -- No technician named: let the system pick the best schedule fit.
+        v_technician_id := fn_recommend_technician(v_scheduled, v_due, p_specialization);
+        IF v_technician_id IS NOT NULL THEN
+            v_status := 'assigned';
+        ELSE
+            RAISE NOTICE
+                'No technician fits the % .. % window; leaving order unassigned.',
+                v_scheduled, v_due;
+        END IF;
     END IF;
 
     -- Generate a readable, unique work-order number: WO-YYYY-NNNNNN
@@ -85,14 +171,18 @@ BEGIN
 
     INSERT INTO work_orders (
         work_order_number, asset_id, technician_id, title, description,
-        status, priority, scheduled_date, estimated_hours)
+        status, priority, scheduled_date, due_date, estimated_hours)
     VALUES (
         v_wo_number, v_asset_id, v_technician_id, p_title, p_description,
-        v_status, p_priority, p_scheduled_date, p_estimated_hours)
+        v_status, p_priority, v_scheduled, v_due, p_estimated_hours)
     RETURNING work_order_id INTO p_new_work_order_id;
 
-    RAISE NOTICE 'Created work order % (id=%) for asset %.',
-        v_wo_number, p_new_work_order_id, p_asset_tag;
+    SELECT employee_code INTO p_assigned_employee_code
+      FROM technicians WHERE technician_id = v_technician_id;
+
+    RAISE NOTICE 'Created work order % (id=%) for asset %, due %, assigned to %.',
+        v_wo_number, p_new_work_order_id, p_asset_tag, v_due,
+        COALESCE(p_assigned_employee_code, '(unassigned)');
 END;
 $$;
 

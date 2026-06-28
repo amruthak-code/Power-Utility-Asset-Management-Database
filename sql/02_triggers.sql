@@ -42,6 +42,53 @@ CREATE TRIGGER trg_schedules_updated_at   BEFORE UPDATE ON maintenance_schedules
     FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
 
 -- =============================================================================
+-- SLA helper: how many days a work order of a given priority gets to be
+-- completed, measured from its scheduled (planned start) date.
+--   critical -> 1 day   high -> 3 days   medium -> 14 days   low -> 30 days
+-- IMMUTABLE so it can be used in defaults / generated expressions if desired.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION fn_priority_sla_days(p_priority work_order_priority_enum)
+RETURNS INTEGER AS $$
+    SELECT CASE p_priority
+               WHEN 'critical' THEN 1
+               WHEN 'high'     THEN 3
+               WHEN 'medium'   THEN 14
+               WHEN 'low'      THEN 30
+           END;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- =============================================================================
+-- BEFORE trigger on work_orders:
+--   (a) On INSERT, if due_date was not supplied, derive it from the SLA:
+--          due_date = COALESCE(scheduled_date, created date) + SLA(priority)
+--   (b) On INSERT/UPDATE, if the order is being completed without a
+--          completed_date, stamp it with today's date (keeps the
+--          chk_completed_has_date constraint satisfied automatically).
+-- Runs BEFORE the row is written, so it also satisfies table constraints.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION fn_work_order_dates()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' AND NEW.due_date IS NULL THEN
+        NEW.due_date := COALESCE(NEW.scheduled_date, CURRENT_DATE)
+                        + fn_priority_sla_days(NEW.priority);
+    END IF;
+
+    IF NEW.status = 'completed' AND NEW.completed_date IS NULL THEN
+        NEW.completed_date := CURRENT_DATE;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_work_order_dates ON work_orders;
+CREATE TRIGGER trg_work_order_dates
+    BEFORE INSERT OR UPDATE OF status, completed_date, due_date,
+                              scheduled_date, priority ON work_orders
+    FOR EACH ROW EXECUTE FUNCTION fn_work_order_dates();
+
+-- =============================================================================
 -- TRIGGER 1: Auto-update asset last_inspected_date on work-order completion.
 -- =============================================================================
 CREATE OR REPLACE FUNCTION fn_asset_last_inspected()

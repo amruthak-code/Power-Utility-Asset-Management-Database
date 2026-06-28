@@ -113,7 +113,10 @@ CREATE TABLE work_orders (
     description       TEXT,
     status            work_order_status_enum   NOT NULL DEFAULT 'open',
     priority          work_order_priority_enum NOT NULL DEFAULT 'medium',
-    scheduled_date    DATE,
+    scheduled_date    DATE,                                 -- planned start date
+    -- due_date is the SLA deadline. Auto-filled on INSERT by
+    -- trg_work_order_dates from priority + scheduled_date when not supplied.
+    due_date          DATE,
     completed_date    DATE,
     estimated_hours   NUMERIC(6,2) CHECK (estimated_hours >= 0),
     actual_hours      NUMERIC(6,2) CHECK (actual_hours   >= 0),
@@ -123,7 +126,11 @@ CREATE TABLE work_orders (
 
     -- A completed order must carry a completion date.
     CONSTRAINT chk_completed_has_date
-        CHECK (status <> 'completed' OR completed_date IS NOT NULL)
+        CHECK (status <> 'completed' OR completed_date IS NOT NULL),
+    -- The deadline cannot precede the planned start.
+    CONSTRAINT chk_due_after_scheduled
+        CHECK (due_date IS NULL OR scheduled_date IS NULL
+               OR due_date >= scheduled_date)
 );
 
 COMMENT ON TABLE work_orders IS 'Maintenance / repair jobs scheduled against assets.';
@@ -176,6 +183,7 @@ CREATE INDEX idx_work_orders_asset        ON work_orders (asset_id);
 CREATE INDEX idx_work_orders_technician   ON work_orders (technician_id);
 CREATE INDEX idx_work_orders_status       ON work_orders (status);
 CREATE INDEX idx_work_orders_scheduled    ON work_orders (scheduled_date);
+CREATE INDEX idx_work_orders_due          ON work_orders (due_date);
 CREATE INDEX idx_schedules_asset          ON maintenance_schedules (asset_id);
 CREATE INDEX idx_schedules_next_due       ON maintenance_schedules (next_due_date);
 CREATE INDEX idx_history_work_order        ON work_order_history (work_order_id);

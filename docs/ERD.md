@@ -62,8 +62,9 @@ erDiagram
         text         description
         enum         status
         enum         priority
-        date         scheduled_date
-        date         completed_date
+        date         scheduled_date "planned start"
+        date         due_date "SLA deadline, trigger-derived"
+        date         completed_date "auto-stamped on completion"
         numeric      estimated_hours
         numeric      actual_hours
         numeric      cost
@@ -202,6 +203,7 @@ These keep derived columns and the audit trail correct without application code:
 
 | Trigger | Fires on | Effect |
 |---------|----------|--------|
+| `trg_work_order_dates` | `work_orders` BEFORE INSERT/UPDATE | Derives `due_date` from `priority` + `scheduled_date` on insert (SLA), and auto-stamps `completed_date` with today when an order is marked `completed`. |
 | `trg_asset_last_inspected` | `work_orders` INSERT/UPDATE when status becomes `completed` | Sets `assets.last_inspected_date`, restores `under_maintenance` assets to `in_service`, and advances the matching `maintenance_schedules.next_due_date`. |
 | `trg_technician_availability` | `work_orders` INSERT/UPDATE/DELETE | Recomputes `technicians.is_available` from the count of active orders vs. `max_active_orders`. |
 | `trg_work_order_audit` | `work_orders` INSERT/UPDATE of status or technician | Writes a row into `work_order_history`. |
@@ -214,11 +216,31 @@ These keep derived columns and the audit trail correct without application code:
 | View | Purpose |
 |------|---------|
 | `vw_overdue_assets` | Assets whose active maintenance schedule is past due, ranked by an urgency score (`days_overdue × criticality`). |
+| `vw_overdue_work_orders` | Active work orders past their SLA `due_date`, with `days_late` and owner, most overdue first. |
 | `vw_technician_workload` | Per-technician active/completed counts, hours logged, and utilization (% of capacity). |
 
 ## 6. Stored Procedures / Functions
 
 | Routine | Type | Purpose |
 |---------|------|---------|
-| `sp_create_work_order(...)` | PROCEDURE | Validates the asset/technician, checks technician capacity, generates a `WO-YYYY-NNNNNN` number, inserts the order, and returns the new id. |
+| `sp_create_work_order(...)` | PROCEDURE | Validates the asset, computes the order's `[scheduled_date, due_date]` window, then either (a) checks an explicitly-named technician fits that window, or (b) auto-assigns the best-fit technician. Generates a `WO-YYYY-NNNNNN` number and returns the new id + assigned technician. |
+| `fn_priority_sla_days(priority)` | FUNCTION | SLA days per priority: critical 1, high 3, medium 14, low 30. |
+| `fn_technician_overlap_count(tech, start, due)` | FUNCTION | Count of a technician's active orders whose window overlaps `[start, due]`. |
+| `fn_technician_fits(tech, start, due)` | FUNCTION → bool | TRUE when the technician has room (overlap count < `max_active_orders`). |
+| `fn_recommend_technician(start, due, specialization)` | FUNCTION | Best-fit technician for a window: least time-conflicted, then least loaded, then highest certification. |
 | `fn_generate_maintenance_report(start, end)` | FUNCTION → TABLE | Per-asset summary over a date window: completed orders, open orders, total cost, hours, average resolution days. |
+
+### Scheduling model — how dates are decided
+
+- **`scheduled_date`** is the planned start (supplied when the order is created;
+  defaults to today if omitted).
+- **`due_date`** is the SLA deadline, derived as
+  `scheduled_date + fn_priority_sla_days(priority)` by `trg_work_order_dates` —
+  so a `critical` order is due in 1 day, `low` in 30.
+- **`completed_date`** is auto-stamped with today's date the moment an order is
+  marked `completed` (you can still pass an explicit date to override).
+- **Assignment fit:** each active order occupies its `[scheduled_date, due_date]`
+  window. A technician may take a new order only if the number of their active
+  orders whose windows *overlap* the new one is below `max_active_orders`. This
+  prevents double-booking across overlapping deadlines while the `is_available`
+  boolean continues to reflect overall load.
